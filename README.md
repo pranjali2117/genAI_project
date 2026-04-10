@@ -39,15 +39,12 @@ Main interface includes:
 * CricAPI (Live cricket data)
 
 ```
-
 ## 📸 Example Usage
 
 1. Login or register
 2. Enter a sports topic like:
-
 ```
 Write an IPL match report for MI vs CSK
-```
 
 3. The AI will generate a professional article using live match data.
 ---
