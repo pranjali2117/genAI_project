@@ -1,0 +1,9 @@
+streamlit
+requests
+python-dotenv
+groq
+chromadb
+sentence-transformers
+bcrypt
+pandas
+matplotlib
