@@ -88,17 +88,38 @@ def get_matches():
         return "MI vs CSK | Live\nRCB vs RR | Upcoming\nPBKS vs GT | Completed"
 
 # ---------------- AI Generation ----------------
-def generate(query,match):
-    prompt=f"""Write a professional sports article about:
+def generate(query, match, style="ESPN Analysis"):
+
+    style_instructions = {
+        "ESPN Analysis":
+            "Write like an ESPN analyst. Open dramatically, give deep tactical insight, end with a verdict.",
+        "Match Recap":
+            "Write a structured match recap: key moments, turning points, player ratings, final result.",
+        "Twitter Thread":
+            "Write as a Twitter/X thread. Number each tweet 1/, 2/, 3/ etc. Keep each tweet under 280 characters. Make it punchy and engaging.",
+        "Cricket Tips":
+            "Focus on fantasy cricket value. List top picks, differential picks, and players to avoid with reasons.",
+        "Post-Match Press Conference":
+            "Write as a simulated post-match press conference Q&A between a journalist and the winning captain.",
+    }
+
+    instruction = style_instructions.get(style, style_instructions["ESPN Analysis"])
+
+    prompt = f"""Write a professional sports article about:
 {query}
 
 Using match info:
 {match}
-Style: ESPN / Cricbuzz analysis."""
-    r=client.chat.completions.create(
+
+Style instructions: {instruction}"""
+
+    r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         temperature=0.7,
-        messages=[{"role":"user","content":prompt}]
+        messages=[
+            {"role": "system", "content": "You are an expert sports journalist and analyst."},
+            {"role": "user", "content": prompt},
+        ],
     )
     return r.choices[0].message.content
 
@@ -135,49 +156,94 @@ else:
         st.session_state.user=None; st.rerun()
 
     # -------- Generate --------
-    if page=="Generate":
+    if page == "Generate":
 
-       st.title("🏏 Sports Content Generator")
-       c1,c2=st.columns([3,1])
+        st.title("🏏 Sports Content Generator")
+        c1, c2 = st.columns([3, 1])
 
-    # -------- LEFT COLUMN --------
-       with c1:
+        # -------- LEFT COLUMN --------
+        with c1:
             query = st.text_input("Enter topic")
-  
+
+            # ✅ NEW: Style / tone selector
+            style = st.selectbox(
+                "Article style",
+                [
+                    "ESPN Analysis",
+                    "Match Recap",
+                    "Twitter Thread",
+                    "Fantasy Cricket Tips",
+                    "Post-Match Press Conference",
+                ],
+            )
+
             if st.button("Generate Article"):
                 if query:
-                    with st.spinner("Generating..."):
-                       match = get_matches()
-                       article = generate(query,match)
+                    # ✅ NEW: Step-by-step status messages
+                    status = st.empty()
 
-                    st.markdown(article)
-                    save_hist(st.session_state.user,query,article)
+                    status.info("📡 Fetching live match data...")
+                    match = get_matches()
+
+                    status.info("🧠 Retrieving sports knowledge...")
+                    import time; time.sleep(0.5)   # small pause so user sees the step
+
+                    status.info("✍️ Writing your article...")
+                    article = generate(query, match, style)   # pass style to generate()
+
+                    status.empty()   # clear the status box when done
+
+                    # ✅ NEW: Show article in a nice card
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background: #1e293b;
+                            border-radius: 12px;
+                            padding: 24px 28px;
+                            color: #f1f5f9;
+                            line-height: 1.8;
+                            font-size: 15px;
+                            margin-top: 12px;
+                        ">
+                        {article.replace(chr(10), '<br>')}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                    # ✅ NEW: Download button
+                    st.download_button(
+                        label="⬇️ Download Article",
+                        data=article,
+                        file_name=f"{query[:30].replace(' ', '_')}_article.txt",
+                        mime="text/plain",
+                    )
+
+                    save_hist(st.session_state.user, query, article)
 
                 else:
-                   st.warning("Enter a topic")
+                    st.warning("Enter a topic")
 
-    # -------- RIGHT COLUMN BUTTON --------
-       with c2:
-
-            if "panel" not in st.session_state:
-               st.session_state.panel = False
- 
-            if st.button("🔥 Trending"):
-               st.session_state.panel = not st.session_state.panel
-
-    # -------- SLIDING PANEL --------
-       panel_class = "right-panel open" if st.session_state.panel else "right-panel"
-    
-       matches = get_matches()
-
-       formatted_matches = matches.replace("\n","<br><br>")
-
-       st.markdown(f"""
-            <div class="{panel_class}">
-            <h3>🔥 Trending Matches</h3>
-            {formatted_matches}
-            </div>
-            """, unsafe_allow_html=True)
+        # -------- RIGHT COLUMN --------
+        with c2:
+            st.markdown("### 🔥 Trending")
+            matches = get_matches()
+            for line in matches.split("\n"):
+                if line.strip():
+                    st.markdown(
+                        f"""
+                        <div style="
+                            background: #1e293b;
+                            border-radius: 8px;
+                            padding: 10px 14px;
+                            color: #f1f5f9;
+                            font-size: 13px;
+                            margin-bottom: 8px;
+                        ">{line}</div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+       
     # -------- History --------
     if page=="History":
         st.title("📚 Article History")
