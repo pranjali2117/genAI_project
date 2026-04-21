@@ -1,42 +1,23 @@
-import streamlit as st, sqlite3, bcrypt, requests, os, datetime
+import streamlit as st, sqlite3, requests, os, datetime, time
 from dotenv import load_dotenv
+from auth import show_auth_page
 from groq import Groq
 
 # ---------------- Config ----------------
-st.set_page_config(page_title="🏏 Sports genAI ", layout="wide")
+st.set_page_config(page_title="🏏 SportsGPT", layout="wide")
 st.markdown("""
 <style>
-
 .right-panel {
-position: fixed;
-top: 80px;
-right: -320px;
-width: 300px;
-height: 80%;
-background: #1e293b;
-color: white;
-padding: 20px;
-border-radius: 12px 0 0 12px;
-box-shadow: -4px 0 20px rgba(0,0,0,0.4);
-transition: right 0.4s ease;
-z-index: 999;
+    position: fixed; top: 80px; right: -320px; width: 300px; height: 80%;
+    background: #1e293b; color: white; padding: 20px;
+    border-radius: 12px 0 0 12px; box-shadow: -4px 0 20px rgba(0,0,0,0.4);
+    transition: right 0.4s ease; z-index: 999;
 }
-
-.right-panel.open {
-right: 0;
-}
-
+.right-panel.open { right: 0; }
 .toggle-btn {
-position: fixed;
-right: 10px;
-top: 120px;
-background: #2563eb;
-color: white;
-border-radius: 20px;
-padding: 8px 14px;
-cursor: pointer;
+    position: fixed; right: 10px; top: 120px; background: #2563eb;
+    color: white; border-radius: 20px; padding: 8px 14px; cursor: pointer;
 }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -48,205 +29,205 @@ CRIC_API_KEY = os.getenv("CRIC_API_KEY")
 conn = sqlite3.connect("sports_ai.db", check_same_thread=False)
 cur = conn.cursor()
 
-cur.execute("CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY,password TEXT)")
+cur.execute("CREATE TABLE IF NOT EXISTS users(username TEXT PRIMARY KEY, password TEXT)")
 cur.execute("""CREATE TABLE IF NOT EXISTS history(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-username TEXT,query TEXT,article TEXT,timestamp TEXT)""")
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT, query TEXT, article TEXT, timestamp TEXT)""")
 conn.commit()
 
-# ---------------- Auth ----------------
-def register(u,p):
-    try:
-        cur.execute("INSERT INTO users VALUES (?,?)",
-        (u,bcrypt.hashpw(p.encode(),bcrypt.gensalt())))
-        conn.commit(); return True
-    except: return False
-
-def login(u,p):
-    cur.execute("SELECT password FROM users WHERE username=?",(u,))
-    r=cur.fetchone()
-    return r and bcrypt.checkpw(p.encode(),r[0])
-
 # ---------------- History ----------------
-def save_hist(u,q,a):
+def save_hist(u, q, a):
     cur.execute("INSERT INTO history(username,query,article,timestamp) VALUES (?,?,?,?)",
-                (u,q,a,str(datetime.datetime.now())))
+                (u, q, a, str(datetime.datetime.now())))
     conn.commit()
 
 def load_hist(u):
-    cur.execute("SELECT query,article,timestamp FROM history WHERE username=?",(u,))
+    cur.execute("SELECT query,article,timestamp FROM history WHERE username=?", (u,))
     return cur.fetchall()
 
 # ---------------- Live Matches ----------------
 def get_matches():
+    """Returns a list of match dicts. Falls back to dummy data on error."""
     try:
-        data=requests.get(
-        f"https://api.cricapi.com/v1/currentMatches?apikey={CRIC_API_KEY}"
+        data = requests.get(
+            f"https://api.cricapi.com/v1/currentMatches?apikey={CRIC_API_KEY}"
         ).json()
-        return "\n".join([f"{m['name']} | {m['status']}" for m in data.get("data",[])[:3]])
+        matches = data.get("data", [])[:5]
+        # Normalise to the fields we actually use
+        return [
+            {
+                "name":   m.get("name", "Unknown"),
+                "status": m.get("status", ""),
+                "teams":  m.get("teams", []),
+                "venue":  m.get("venue", "TBD"),
+                "date":   m.get("dateTimeGMT", "")[:16],   # "YYYY-MM-DDTHH:MM" → strip seconds/Z
+            }
+            for m in matches
+        ]
     except:
-        return "MI vs CSK | Live\nRCB vs RR | Upcoming\nPBKS vs GT | Completed"
+        # Fallback dummy data so the UI never crashes
+        now = datetime.datetime.now()
+        fmt = "%Y-%m-%dT%H:%M"
+        return [
+            {"name": "MI vs CSK",   "status": "Live",      "teams": ["MI", "CSK"],   "venue": "Wankhede",    "date": now.strftime(fmt)},
+            {"name": "RCB vs RR",   "status": "Upcoming",  "teams": ["RCB", "RR"],   "venue": "Chinnaswamy", "date": (now + datetime.timedelta(hours=3)).strftime(fmt)},
+            {"name": "PBKS vs GT",  "status": "Completed", "teams": ["PBKS", "GT"],  "venue": "Mohali",      "date": (now - datetime.timedelta(hours=5)).strftime(fmt)},
+        ]
+
+def matches_as_text(matches):
+    """Plain-text summary used as context for the AI prompt."""
+    return "\n".join([f"{m['name']} | {m['status']}" for m in matches])
 
 # ---------------- AI Generation ----------------
-def generate(query, match, style="ESPN Analysis"):
-
+def generate(query, match_text, style="ESPN Analysis"):
     style_instructions = {
-        "ESPN Analysis":
-            "Write like an ESPN analyst. Open dramatically, give deep tactical insight, end with a verdict.",
-        "Match Recap":
-            "Write a structured match recap: key moments, turning points, player ratings, final result.",
-        "Twitter Thread":
-            "Write as a Twitter/X thread. Number each tweet 1/, 2/, 3/ etc. Keep each tweet under 280 characters. Make it punchy and engaging.",
-        "Cricket Tips":
-            "Focus on fantasy cricket value. List top picks, differential picks, and players to avoid with reasons.",
-        "Post-Match Press Conference":
-            "Write as a simulated post-match press conference Q&A between a journalist and the winning captain.",
+        "ESPN Analysis": """
+Write like an elite ESPN sports analyst.
+- Start with a dramatic, powerful opening.
+- Provide deep tactical insights (strategy, key moments, matchups).
+- Explain WHY the result happened, not just what happened.
+- Highlight key players and critical decisions.
+- End with a strong, confident verdict.
+""",
+        "Match Recap": """
+Write a structured match recap.
+Include:
+- Match Summary
+- Key Moments (chronological highlights)
+- Turning Points
+- Player Performances
+- Player Ratings (out of 10 with short reasons)
+- Final Result
+Keep it clear, factual, and well-organized.
+""",
+        "Twitter Thread": """
+Write as a Twitter/X thread.
+- Format as: 1/, 2/, 3/ ...
+- Each tweet must be under 280 characters.
+- Keep it punchy, engaging, and slightly dramatic.
+- Use strong hooks and concise insights.
+- Make it highly shareable.
+""",
+        "Match Tips": """
+Act as a fantasy Sports expert.
+Provide:
+- Top Picks (reliable players with reasons)
+- Differential Picks (underrated/high-upside players)
+- Players to Avoid (risky or out-of-form players with reasons)
+Consider pitch, form, and match conditions.
+Keep it practical and decision-focused.
+""",
+        "Post-Match Press Conference": """
+Simulate a post-match press conference.
+- Format as a Q&A between journalist and winning captain.
+- Include at least 6–8 questions.
+- Cover match performance, strategy, key moments.
+- Keep answers realistic, professional, and insightful.
+"""
     }
 
-    instruction = style_instructions.get(style, style_instructions["ESPN Analysis"])
+    prompt = f"""
+You are a professional sports content generator.
 
-    prompt = f"""Write a professional sports article about:
+MATCH CONTEXT:
+{match_text}
+
+USER QUERY:
 {query}
 
-Using match info:
-{match}
+STYLE:
+{style}
 
-Style instructions: {instruction}"""
+INSTRUCTIONS:
+{style_instructions.get(style, "")}
+
+Rules:
+- Do NOT mix styles
+- Keep output clean and well formatted
+- Use real player/team names if available
+- Do NOT mention instructions
+
+Generate the response now.
+"""
 
     r = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         temperature=0.7,
         messages=[
-            {"role": "system", "content": "You are an expert sports journalist and analyst."},
+            {"role": "system", "content": "You are an expert sports analyst and content writer. Adapt tone and structure strictly based on the requested style."},
             {"role": "user", "content": prompt},
         ],
     )
     return r.choices[0].message.content
 
-# ---------------- Session ----------------
-if "user" not in st.session_state: st.session_state.user=None
-
-# ---------------- Login UI ----------------
-if not st.session_state.user:
-
-    st.title("🚀 Login or Register")
-
-    tab1,tab2=st.tabs(["Login","Register"])
-
-    with tab1:
-        u=st.text_input("Username")
-        p=st.text_input("Password",type="password")
-        if st.button("Login"):
-            if login(u,p):
-                st.session_state.user=u; st.rerun()
-            else: st.error("Invalid credentials")
-
-    with tab2:
-        u=st.text_input("New Username")
-        p=st.text_input("New Password",type="password")
-        if st.button("Create Account"):
-            st.success("Account created!") if register(u,p) else st.error("User exists")
+# ---------------- Session Guard ----------------
+if "user" not in st.session_state or not st.session_state.user:
+    show_auth_page()  
+    st.stop()
 
 # ---------------- Main App ----------------
-else:
-    st.sidebar.write(f"Welcome {st.session_state.user} \n")
-    page=st.sidebar.radio("\nMenu",["Generate","History"])
-    print("\n\n")
-    if st.sidebar.button("Logout"):
-        st.session_state.user=None; st.rerun()
+st.sidebar.write(f"Welcome {st.session_state.user}")
+page = st.sidebar.radio("Menu", ["Generate", "History"])
 
-    # -------- Generate --------
-    if page == "Generate":
+if st.sidebar.button("Logout"):
+    st.session_state.user = None
+    st.rerun()
 
-        st.title("🏏 Sports Content Generator")
-        c1, c2 = st.columns([3, 1])
+# -------- Generate --------
+if page == "Generate":
+    st.title("🏏 SportsGPT")
+    st.subheader("Sports Content Generator")
+    c1, c2 = st.columns([3, 1])
 
-        # -------- LEFT COLUMN --------
-        with c1:
-            query = st.text_input("Enter topic")
+    # -------- LEFT COLUMN --------
+    with c1:
+        query = st.text_input("Enter topic")
+        style = st.selectbox(
+            "Article style",
+            ["ESPN Analysis", "Match Recap", "Twitter Thread", "Match Tips", "Post-Match Press Conference"],
+        )
 
-            # ✅ NEW: Style / tone selector
-            style = st.selectbox(
-                "Article style",
-                [
-                    "ESPN Analysis",
-                    "Match Recap",
-                    "Twitter Thread",
-                    "Fantasy Cricket Tips",
-                    "Post-Match Press Conference",
-                ],
-            )
+        if st.button("Generate Article"):
+            if query:
+                status = st.empty()
 
-            if st.button("Generate Article"):
-                if query:
-                    # ✅ NEW: Step-by-step status messages
-                    status = st.empty()
+                status.info("📡 Fetching live match data...")
+                matches = get_matches()                        # list of dicts
 
-                    status.info("📡 Fetching live match data...")
-                    match = get_matches()
+                status.info("🧠 Retrieving sports knowledge...")
+                time.sleep(0.5)
 
-                    status.info("🧠 Retrieving sports knowledge...")
-                    import time; time.sleep(0.5)   # small pause so user sees the step
+                status.info("✍️ Writing your article...")
+                article = generate(query, matches_as_text(matches), style)
 
-                    status.info("✍️ Writing your article...")
-                    article = generate(query, match, style)   # pass style to generate()
+                status.empty()
 
-                    status.empty()   # clear the status box when done
+                st.markdown(
+                    f"""
+                    <div style="
+                        background:#1e293b; border-radius:12px; padding:24px 28px;
+                        color:#f1f5f9; line-height:1.8; font-size:15px; margin-top:12px;
+                    ">
+                    {article.replace(chr(10), '<br>')}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-                    # ✅ NEW: Show article in a nice card
-                    st.markdown(
-                        f"""
-                        <div style="
-                            background: #1e293b;
-                            border-radius: 12px;
-                            padding: 24px 28px;
-                            color: #f1f5f9;
-                            line-height: 1.8;
-                            font-size: 15px;
-                            margin-top: 12px;
-                        ">
-                        {article.replace(chr(10), '<br>')}
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                st.download_button(
+                    label="⬇️ Download Article",
+                    data=article,
+                    file_name=f"{query[:30].replace(' ', '_')}_article.txt",
+                    mime="text/plain",
+                )
 
-                    # ✅ NEW: Download button
-                    st.download_button(
-                        label="⬇️ Download Article",
-                        data=article,
-                        file_name=f"{query[:30].replace(' ', '_')}_article.txt",
-                        mime="text/plain",
-                    )
-
-                    save_hist(st.session_state.user, query, article)
-
-                else:
-                    st.warning("Enter a topic")
-
-        # -------- RIGHT COLUMN --------
-        with c2:
-            st.markdown("### 🔥 Trending")
-            matches = get_matches()
-            for line in matches.split("\n"):
-                if line.strip():
-                    st.markdown(
-                        f"""
-                        <div style="
-                            background: #1e293b;
-                            border-radius: 8px;
-                            padding: 10px 14px;
-                            color: #f1f5f9;
-                            font-size: 13px;
-                            margin-bottom: 8px;
-                        ">{line}</div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-       
-    # -------- History --------
-    if page=="History":
-        st.title("📚 Article History")
-        for q,a,t in load_hist(st.session_state.user):
-            with st.expander(f"{q} ({t[:10]})"):
-                st.write(a)
+                save_hist(st.session_state.user, query, article)
+            else:
+                st.warning("Enter a topic")
+    
+# -------- History --------
+if page == "History":
+    st.title("📚 Article History")
+    for q, a, t in load_hist(st.session_state.user):
+        with st.expander(f"{q} ({t[:10]})"):
+            st.write(a)
